@@ -1,11 +1,11 @@
-use clap::Parser;
+use clap::{Parser};
 use std::{thread::{self},time};
 
 #[derive(Parser, Debug)]
-#[clap(author="Kato", version, about="tile downloader")]
+#[clap(author="Kato", version, about="Download image tiles from a webserver. Replaces {x}, {y} in url with tile-number, {z} with zoom-level, and {bounds} with a bounding-box. Reprojection is not supported")]
 struct Args {
 	#[clap(short='u',long)]
-	/// Example: http://maps/{Z}/{X}/{Y}.png
+	/// Example: http://maps/{Z}/{X}/{Y}.png or https://map?bbox={bounds}
 	url: String,
 
 	#[clap(default_value=".",short='o',long)]
@@ -20,14 +20,6 @@ struct Args {
 	/// End zoom-level. Inclusive
 	end_zoom: u32,
 
-	#[clap(default_value="256",long)]
-	/// Width of the downloadeded image
-	tile_width: u32,
-
-	#[clap(default_value="256",long)]
-	/// Height of the downloadeded image
-	tile_height: u32,
-
 	#[clap(default_value="0",short='x',long)]
 	/// Initial x-value
 	x: u32,
@@ -36,40 +28,20 @@ struct Args {
 	/// Initial y-value
 	y: u32,
 
-	#[clap(default_value="false",long)]
-	/// Invert y-axis (not implemented)
-	invert_y_axis:bool,
-
-	#[clap(default_value="1",long)]
-	/// Number of concurrent threads
-	concurrent_threads: usize
+	#[clap(default_value="10",long)]
+	/// Number of concurrent http-requests
+	concurrent_requests: usize
 }
 
 // run a http GET-request (url), save the response content to file (path)
-// return success (Some) or failure (None)
-fn run_request(url:&str, path:&str) -> Option<bool>
+// return success or failure
+fn run_request(url:&str, path:&str) -> Result<(),Box<dyn std::error::Error>>
 {
-	// create a http-client that accepts invalid certs
-	if let Ok(client) = reqwest::blocking::Client::builder()
-	.danger_accept_invalid_certs(true)
-	.build()
-	{
-		// run the http-request
-		if let Ok(mut res) = client.get(url).send() {
-
-			// ok - create the file
-			if let Ok(mut file) = std::fs::File::create(path){
-
-				// ok - copy the response-data to file
-				if let Ok(l) = res.copy_to(&mut file) {
-
-					// if bytes were written, assume success
-					if l > 0 {return Some(true);}
-				}
-			}
-		}
-	}
-	return None;
+	let client = reqwest::blocking::Client::builder().danger_accept_invalid_certs(true).build()?;
+	let mut res = client.get(url).send()?;
+	let mut file = std::fs::File::create(path)?;
+	let _n = res.copy_to(&mut file)?;
+	return Ok(());
 }
 
 fn main() {
@@ -79,7 +51,7 @@ fn main() {
 	//println!("{:?}", args);
 
 	// dynamic array to store running threads
-	let mut handles:Vec<thread::JoinHandle<()>> = vec![];
+	let mut handles:Vec<thread::JoinHandle<()>> = Vec::new();
 
 	// loop through zoom-levels
 	for z in args.start_zoom..args.end_zoom+1 {
@@ -113,12 +85,9 @@ fn main() {
 					let lat = -(y as f32 * lat_step) + 90.0;
 					url = url.replace("{bounds}", format!("({},{},{},{})", lat, lat-lat_step, lon, lon+lon_step).as_str());
 				}
-				// inject tilesize
-				url = url.replace("{w}", args.tile_width.to_string().as_str());
-				url = url.replace("{h}", args.tile_height.to_string().as_str());
 
 				// if there is more running threads - than arg.concurrent_threads
-				while handles.len() > args.concurrent_threads {
+				while handles.len() > args.concurrent_requests {
 					// take a little break, - waiting for threads to finish..
 					thread::sleep(time::Duration::from_millis(10));
 
@@ -137,11 +106,9 @@ fn main() {
 				// spawn a new thread, - move the path and url variable into it
 				let path = format!("{}/{}.png", directory, y.to_string());
 				handles.push(thread::spawn(move||{
-					if let Some(_r) = run_request(url.as_str(), path.as_str()) {
-						//println!("Successfully saved {} to {}", url, path);
-					}
-					else{
-						println!("Failed to save {}", url);
+
+					if let Err(err) = run_request(url.as_str(), path.as_str()) {
+						println!("Failed to save {}. Error: {}", url, err);
 					}
 				}));
 			}
